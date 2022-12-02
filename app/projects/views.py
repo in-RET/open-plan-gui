@@ -3,7 +3,7 @@ from django.contrib.auth.decorators import login_required
 import json
 import logging
 import traceback
-from django.http import HttpResponseForbidden, JsonResponse
+from django.http import JsonResponse
 from django.http.response import Http404
 from django.utils.translation import gettext_lazy as _
 from django.shortcuts import *
@@ -13,7 +13,6 @@ from django.views.decorators.http import require_http_methods
 from django.contrib import messages
 from jsonview.decorators import json_view
 from datetime import datetime
-from users.models import CustomUser
 from django.db.models import Q
 from epa.settings import MVS_GET_URL, MVS_LP_FILE_URL, MVS_SA_GET_URL
 from .forms import *
@@ -36,7 +35,7 @@ from .scenario_topology_helpers import (
     load_scenario_from_dict,
     load_project_from_dict,
 )
-from projects.helpers import format_scenario_for_mvs
+from projects.helpers import format_scenario_for_mvs, epc_calc
 from .constants import DONE, PENDING, ERROR, MODIFIED
 from .services import (
     create_or_delete_simulation_scheduler,
@@ -45,6 +44,9 @@ from .services import (
     get_selected_scenarios_in_cache,
 )
 import traceback
+
+from InRetEnsys import *
+from InRetEnsys.types import Solver
 
 logger = logging.getLogger(__name__)
 
@@ -342,10 +344,9 @@ def project_upload(request):
 
 
 @login_required
-@require_http_methods(["GET", "POST"])
-def project_from_usecase(request, usecase_id=None):
-    if request.method == "POST":
-        usecase_id = request.POST.get("usecase", None)
+@require_http_methods(["POST"])
+def project_from_usecase(request):
+    usecase_id = request.POST.get("usecase", None)
     if usecase_id is not None:
         usecase_id = int(usecase_id)
     else:
@@ -354,20 +355,6 @@ def project_from_usecase(request, usecase_id=None):
     proj_id = usecase.assign(request.user)
 
     return HttpResponseRedirect(reverse("project_search", args=[proj_id]))
-
-
-@login_required
-@require_http_methods(["GET"])
-def usecase_export(request, usecase_id):
-
-    usecase = get_object_or_404(UseCase, id=usecase_id)
-
-    response = HttpResponse(
-        json.dumps(usecase.export(bind_scenario_data=True)),
-        content_type="application/json",
-    )
-    response["Content-Disposition"] = f"attachment; filename=usecase_{usecase.id}.json"
-    return response
 
 
 @login_required
@@ -390,12 +377,9 @@ def project_delete(request, proj_id):
 def project_search(request, proj_id=None, scen_id=None):
     # project_list = Project.objects.filter(user=request.user)
     # shared_project_list = Project.objects.filter(viewers=request.user)
-    combined_projects_list = (
-        Project.objects.filter(Q(user=request.user) | Q(viewers__user=request.user))
-        .distinct()
-        .order_by("date_created")
-        .reverse()
-    )
+    combined_projects_list = Project.objects.filter(
+        Q(user=request.user) | Q(viewers__user=request.user)
+    ).distinct()
 
     scenario_upload_form = UploadFileForm(
         labels=dict(name=_("New scenario name"), file=_("Scenario file"))
@@ -698,42 +682,46 @@ def scenario_create_topology(request, proj_id, scen_id, step_id=2, max_step=3):
     components = {
         "providers": {
             "dso": _("Electricity DSO"),
-            "gas_dso": _("Gas DSO"),
+            # "gas_dso": _("Gas DSO"),
             "h2_dso": _("H2 DSO"),
             "heat_dso": _("Heat DSO"),
         },
         "production": {
             "pv_plant": _("PV Plant"),
             "wind_plant": _("Wind Plant"),
-            "biogas_plant": _("Biogas Plant"),
-            "geothermal_conversion": _("Geothermal Conversion"),
+            # "biogas_plant": _("Biogas Plant"),
+            # "geothermal_conversion": _("Geothermal Conversion"),
             "solar_thermal_plant": _("Solar Thermal Plant"),
+            "mySource": _("Source"),
         },
         "conversion": {
             "transformer_station_in": _("Transformer Station (in)"),  #
             "transformer_station_out": _("Transformer Station (out)"),  #
-            "storage_charge_controller_in": _("Storage Charge Controller (in)"),  #
-            "storage_charge_controller_out": _("Storage Charge Controller (out)"),  #
-            "solar_inverter": _("Solar Inverter"),  #
-            "diesel_generator": _("Diesel Generator"),
-            "fuel_cell": _(" Fuel Cell"),
-            "gas_boiler": _("Gas Boiler"),
+            # "storage_charge_controller_in": _("Storage Charge Controller (in)"),  #
+            # "storage_charge_controller_out": _("Storage Charge Controller (out)"),  #
+            # "solar_inverter": _("Solar Inverter"),  #
+            # "diesel_generator": _("Diesel Generator"),
+            # "fuel_cell": _(" Fuel Cell"),
+            # "gas_boiler": _("Gas Boiler"),
             "electrolyzer": _("Electrolyzer"),
             "heat_pump": _("Heat Pump"),
             "chp": _("Combined Heat and Power"),
-            "chp_fixed_ratio": _("CHP fixed ratio"),
+            # "chp_fixed_ratio": _("CHP fixed ratio"),
+            "myTransformer": _("Transformer"),
         },
         "storage": {
             "bess": _("Electricity Storage"),
             # "gess": _("Gas Storage"),
             # "h2ess": _("H2 Storage"),
             "hess": _("Heat Storage"),
+            "myGenericStorage": _("GenericStorage"),
         },
         "demand": {
             "demand": _("Electricity Demand"),
             # "gas_demand": _("Gas Demand"),
             # "h2_demand": _("H2 Demand"),
-            "heat_demand": _("Heat Demand"),
+            # "heat_demand": _("Heat Demand"),
+            "mySink": _("Sink"),
         },
         "bus": {"bus": _("Bus")},
     }
@@ -1225,6 +1213,86 @@ def get_asset_create_form(request, scen_id=0, asset_type_name="", asset_uuid=Non
             form = BusForm(asset_type=asset_type_name, initial={"name": default_name})
         return render(request, "asset/bus_create_form.html", {"form": form})
 
+    elif asset_type_name in ["mySource", "mySink", "myTransformer"]:
+        if asset_uuid:
+            existing_asset = get_object_or_404(Asset, unique_id=asset_uuid)
+            form = AssetCreateForm(asset_type=asset_type_name, instance=existing_asset)
+            input_timeseries_data = (
+                existing_asset.input_timeseries
+                if existing_asset.input_timeseries
+                else ""
+            )
+        else:
+            print(asset_type_name)
+            asset_list = Asset.objects.filter(
+                asset_type__asset_type=asset_type_name, scenario=scenario
+            )
+            n_asset = len(asset_list)
+            default_name = f"{asset_type_name}-{n_asset}"
+            form = AssetCreateForm(
+                asset_type=asset_type_name, initial={"name": default_name}
+            )
+            input_timeseries_data = ""
+
+        context = {
+            "form": form,
+            "input_timeseries_data": input_timeseries_data,
+            "input_timeseries_timestamps": json.dumps(
+                scenario.get_timestamps(json_format=True)
+            ),
+        }
+
+        return render(request, "asset/asset_create_form.html", context)
+
+    elif asset_type_name in ["myGenericStorage"]:
+        if asset_uuid:
+            existing_ess_asset = get_object_or_404(Asset, unique_id=asset_uuid)
+            print(existing_ess_asset)
+            ess_asset_children = Asset.objects.filter(
+                parent_asset=existing_ess_asset.id
+            )
+            # ess_capacity_asset = ess_asset_children.get(
+            #     asset_type__asset_type="capacity"
+            # )
+            # ess_charging_power_asset = ess_asset_children.get(
+            #     asset_type__asset_type="charging_power"
+            # )
+            # ess_discharging_power_asset = ess_asset_children.get(
+            #     asset_type__asset_type="discharging_power"
+            # )
+            # also get all child assets
+            form = StorageForm_II(
+                asset_type=asset_type_name,
+                initial={
+                    "name": existing_ess_asset.name,
+                    "nominal_value": existing_ess_asset.nominal_value,
+                    "variable_costs": existing_ess_asset.variable_costs,
+                    "capex": existing_ess_asset.capex,
+                    "opex": existing_ess_asset.opex,
+                    "offset": existing_ess_asset.offset,
+                    "maximum": existing_ess_asset.maximum,
+                    "minimum": existing_ess_asset.minimum,
+                    "lifetime": existing_ess_asset.lifetime,
+                    "existing": existing_ess_asset.existing,
+                    "invest_relation_output_capacity": existing_ess_asset.invest_relation_output_capacity,
+                    "invest_relation_input_capacity": existing_ess_asset.invest_relation_input_capacity,
+                    "initial_storage_level": existing_ess_asset.initial_storage_level,
+                    "inflow_conversion_factor": existing_ess_asset.inflow_conversion_factor,
+                    "outflow_conversion_factor": existing_ess_asset.outflow_conversion_factor,
+                    "balanced": existing_ess_asset.balanced,
+                    "nominal_storage_capacity": existing_ess_asset.nominal_storage_capacity,
+                    "thermal_loss_rate": existing_ess_asset.thermal_loss_rate,
+                    "fixed_thermal_losses_relative": existing_ess_asset.fixed_thermal_losses_relative,
+                    "fixed_thermal_losses_absolute": existing_ess_asset.fixed_thermal_losses_absolute,
+                },
+                input_output_mapping=input_output_mapping,
+            )
+        else:
+            form = StorageForm_II(
+                asset_type=asset_type_name, input_output_mapping=input_output_mapping
+            )
+        return render(request, "asset/storage_asset_create_form.html", {"form": form})
+
     elif asset_type_name in ["bess", "h2ess", "gess", "hess"]:
         if asset_uuid:
             existing_ess_asset = get_object_or_404(Asset, unique_id=asset_uuid)
@@ -1431,6 +1499,12 @@ def test_mvs_data_input(request, scen_id=0):
 @login_required
 @require_http_methods(["GET", "POST"])
 def request_mvs_simulation(request, scen_id=0):
+
+    list_sources = []
+    list_busses = []
+    list_sinks = []
+    list_storages = []
+
     if scen_id == 0:
         answer = JsonResponse(
             {"status": "error", "error": "No scenario id provided"},
@@ -1439,8 +1513,123 @@ def request_mvs_simulation(request, scen_id=0):
         )
     # Load scenario
     scenario = Scenario.objects.get(pk=scen_id)
+    print(scenario)
     try:
         data_clean = format_scenario_for_mvs(scenario)
+
+        keysList = [key for key in data_clean]
+        print(keysList)
+        for k, v in data_clean.items():
+            for i in v:
+                if k == "energy_busses":
+                    print("\nEnergy Busses: \n")
+                    print("{} : {}".format(k, i))
+                    list_busses.append(InRetEnsysBus(label=i["label"]))
+
+        for k, v in data_clean.items():
+            for i in v:
+                if k == "energy_production":
+                    print("\nEnergy Production: \n")
+                    print("{} : {}".format(k, i))
+                    print(i["label"])
+
+                    list_sources.append(
+                        InRetEnsysSource(
+                            label=i["label"],
+                            outputs={
+                                i["outflow_direction"]: InRetEnsysFlow(
+                                    fix=i["input_timeseries"]["value"],
+                                    # investment =
+                                    # solph.Investment(ep_costs=epc_calc(i['capex']['value'],
+                                    #                                     i['lifetime']['value'],
+                                    #                                     i['opex']['value'])),
+                                    variable_costs=i["variable_costs"]["value"]
+                                    if (bool(i["variable_costs"]))
+                                    else None,
+                                )
+                            },
+                        )
+                    )
+                elif k == "energy_consumption":
+                    print("\nEnergy Consumption: \n")
+                    print("{} : {}".format(k, i))
+
+                    list_sinks.append(
+                        InRetEnsysSink(
+                            label=i["label"],
+                            inputs={
+                                i["inflow_direction"]: InRetEnsysFlow(
+                                    fix=i["input_timeseries"]["value"],
+                                    nominal_value=i["nominal_value"]["value"],
+                                )
+                            },
+                        )
+                    )
+                elif k == "energy_storage":
+                    print("\nEnergy Storage: \n")
+                    print("{} : {}".format(k, i))
+
+                    list_storages.append(
+                        InRetEnsysStorage(
+                            label=i["label"],
+                            inputs={i["inflow_direction"]: InRetEnsysFlow()},
+                            outputs={i["outflow_direction"]: InRetEnsysFlow()},
+                            # loss_rate = i['loss_rate'],
+                            initial_storage_level=i["initial_storage_level"]["value"],
+                            balanced=i["balanced"]["value"],
+                            invest_relation_input_capacity=i[
+                                "invest_relation_input_capacity"
+                            ]["value"],
+                            invest_relation_output_capacity=i[
+                                "invest_relation_output_capacity"
+                            ]["value"],
+                            inflow_conversion_factor=i["inflow_conversion_factor"][
+                                "value"
+                            ],
+                            outflow_conversion_factor=i["outflow_conversion_factor"][
+                                "value"
+                            ],
+                            investment=InRetEnsysInvestment(
+                                ep_costs=epc_calc(
+                                    i["capex"]["value"],
+                                    i["lifetime"]["value"],
+                                    i["opex"]["value"],
+                                ),
+                                maximum=i["maximum"]["value"],
+                            ),
+                        )
+                    )
+                elif k == "energy_conversion":
+                    print("\nEnergy Conversion: \n")
+                    print("{} : {}".format(k, i))
+
+        print(data_clean["economic_data"])
+        # date_time_index = pd.date_range(
+        #     "1/1/2022", periods=8760, freq="H"
+        # )
+
+        energysystem = InRetEnsysEnergysystem(
+            busses=list_busses,
+            sinks=list_sinks,
+            sources=list_sources,
+            storages=list_storages,
+            # transformers=[],
+            # timeindex=str(date_time_index)
+            frequenz="hourly",
+            start_date="1/1/2022",
+            time_steps=8760,
+        )
+
+        model = InRetEnsysModel(
+            energysystem=energysystem,
+            solver=Solver.gurobi,
+            # solver_verbose=False
+        )
+
+        jf = open("my_model_config.json", "wt")
+        jf.write(model.json())
+        jf.close()
+        # model.write('my_model.lp', io_options={'symbolic_solver_labels': True}) noch nicht implementiert
         # err = 1/0
     except Exception as e:
         error_msg = f"Scenario Serialization ERROR! User: {scenario.project.user.username}. Scenario Id: {scenario.id}. Thrown Exception: {e}."

@@ -256,9 +256,10 @@ const submitForm = (e) => {
     const topologyNodeId = guiModalDOM.getAttribute("data-node-topo-id"); // e.g. 'node-2'
     const drawflowNodeId = guiModalDOM.getAttribute("data-node-df-id");
 
-    // get the node name field to update it if the form was submitted successfully
+    // rename the node on the fly (to avoid the need of refreshing the page)
     const nodeName = document.getElementById(topologyNodeId).querySelector(".nodeName");
-    const nodeNameValue = guiModalDOM.querySelector('input[df-name]').value;
+    nodeName.textContent = guiModalDOM.querySelector('input[df-name]').value;
+
     // get the data of the form
     const assetForm = e.target.closest('.modal-content').querySelector('form');
     const formData = new FormData(assetForm);
@@ -297,10 +298,6 @@ const submitForm = (e) => {
         contentType: false,   // tells jQuery not to define contentType
         success: function (jsonRes) {
             if (jsonRes.success) {
-
-                // rename the node on the fly (to avoid the need of refreshing the page)
-                nodeName.textContent = nodeNameValue;
-
                 // add the node id to the nodesToDB mapping
                 if (nodesToDB.has(topologyNodeId) === false)
                     nodesToDB.set(topologyNodeId, {uid:jsonRes.asset_id, assetTypeName: assetTypeName });

@@ -22,7 +22,7 @@ def convert_seconds_to_intuitive_string(value):
 
 @register.filter(name="scenario_list")
 def get_scenario_list_from_project(project):
-    return project.scenario_set.all().order_by("name")
+    return project.scenario_set.all()
 
 
 @register.filter
@@ -77,6 +77,14 @@ def is_economical_parameter(param):
         "opex_var",
         "energy_price",
         "feedin_tariff",
+        "variable_costs",
+        "capex",
+        "opex",
+        "offset",
+        "lifetime",
+        "maximum",
+        "minimum",
+        "existing",
     ]
 
 

@@ -528,12 +528,7 @@ GRAPH_PARAMETERS_SCHEMAS = {
     },
     GRAPH_BAR: {},
     GRAPH_PIE: {},
-    GRAPH_LOAD_DURATION: {
-        "type": "object",
-        "required": ["energy_vector"],
-        "properties": {"energy_vector": {"type": "string"}},
-        "additionalProperties": False,
-    },
+    GRAPH_LOAD_DURATION: {},
     GRAPH_SANKEY: {
         "type": "object",
         "required": ["energy_vector"],
